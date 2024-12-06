@@ -1,7 +1,7 @@
 # c compiler configuration
 CC        := gcc
-CVERSION  := -std=gnu11
-CWARNS    := -Wall
+CVERSION  := -std=c11
+CWARNS    := -Wall -Wextra -Wpedantic -Wno-unused-parameter -Werror
 CC_OPT    := -O0
 CINCLUDES :=
 CLIBS     :=
