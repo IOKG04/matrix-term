@@ -11,8 +11,10 @@
 \************************************************/
 
 #define _POSIX_C_SOURCE 200809L
+#define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/ioctl.h>
@@ -20,7 +22,13 @@
 #include <time.h>
 #include <unistd.h>
 
-#define PRINTERR(str) fprintf(stderr, str " at %s, %s, %i\n", __FILE__, __func__, __LINE__)
+#if defined(DEBUG)
+    #define PRINTERR(msg) fprintf(stderr, msg " at %s, %s, %i\nerrno: %s\n", __FILE__, __func__, __LINE__, strerror(errno))
+#elif defined(NDEBUG)
+    #define PRINTERR(msg)
+#else
+    #define PRINTERR(msg) fprintf(stderr, msg "\n")
+#endif
 
 // type of a terminal position
 typedef unsigned short term_pos_t;
@@ -36,8 +44,15 @@ static int set_io_buffering(int kind);
 static term_pos_t term_w,
                   term_h;
 
-int main(int argc, char **argv){
+// pipes
+static int child_stdout[2],
+           child_stderr[2],
+           child_stdin [2];
+
+// entry point (duh)
+int main(void){
     int exit_value = EXIT_SUCCESS;
+    pid_t is_parent = -1;
 
     { // get term_w and -h
         struct winsize wsize;
@@ -57,15 +72,88 @@ int main(int argc, char **argv){
         goto _clean_and_exit;
     }
 
-    char lastchar = 0;
-    while(lastchar != 'q'){
-        ssize_t read_success = read(STDIN_FILENO, &lastchar, 1);
-        if(read_success > 0) putchar(lastchar);
-        sleep_ms(100);
+    // create pipes
+    if(pipe2(child_stdout, O_NONBLOCK)){
+        PRINTERR("Failed to create child_stdout");
+        exit_value = EXIT_FAILURE;
+        goto _clean_and_exit;
+    }
+    if(pipe2(child_stderr, O_NONBLOCK)){
+        PRINTERR("Failed to create child_stderr");
+        exit_value = EXIT_FAILURE;
+        goto _clean_and_exit;
+    }
+    if(pipe2(child_stdin, O_NONBLOCK)){
+        PRINTERR("Failed to create child_stdin");
+        exit_value = EXIT_FAILURE;
+        goto _clean_and_exit;
+    }
+
+    // create child process
+    is_parent = fork();
+    if(is_parent == -1){
+        PRINTERR("Failed to create offspring");
+        exit_value = EXIT_FAILURE;
+        goto _clean_and_exit;
+    }
+
+    // code for the parent
+    if(is_parent){
+    }
+
+    // code for the child
+    else{
+        exit_value = EXIT_SUCCESS; // should be the case anyway, and i assume with -O3 gcc knows that too, but just in case
+
+        // redirect stds
+        if(dup2(child_stdout[1], STDOUT_FILENO) == -1){
+            PRINTERR("Failed to redirect child's stdout");
+            exit_value = EXIT_FAILURE;
+            goto _child_clean_and_exit;
+        }
+        if(dup2(child_stderr[1], STDERR_FILENO) == -1){
+            PRINTERR("Failed to redirect child's stderr");
+            exit_value = EXIT_FAILURE;
+            goto _child_clean_and_exit;
+        }
+        if(dup2(child_stdin[0], STDIN_FILENO) == -1){
+            PRINTERR("Failed to redirect child's stdin");
+            exit_value = EXIT_FAILURE;
+            goto _child_clean_and_exit;
+        }
+
+        // close unused pipe ends
+        if(close(child_stdout[0])){
+            PRINTERR("Failed to close child's unused stdout_pipe end");
+            exit_value = EXIT_FAILURE;
+            goto _child_clean_and_exit;
+        }
+        if(close(child_stderr[0])){
+            PRINTERR("Failed to close child's unused stderr_pipe end");
+            exit_value = EXIT_FAILURE;
+            goto _child_clean_and_exit;
+        }
+        if(close(child_stdin[1])){
+            PRINTERR("Failed to close child's unused stdin_pipe end");
+            exit_value = EXIT_FAILURE;
+            goto _child_clean_and_exit;
+        }
+
+        // TODO: make it execute the new program here
+
+        // exit
+       _child_clean_and_exit:
+        exit(exit_value);
     }
 
     // clean and exit
    _clean_and_exit:
+    if(is_parent > 0 && kill(is_parent, 0) == 0){
+        if(kill(is_parent, SIGKILL)){
+            PRINTERR("Failed to kill child");
+            exit_value = EXIT_FAILURE;
+        }
+    }
     set_io_buffering(IO_BUF_ON);
     exit(exit_value);
 }
