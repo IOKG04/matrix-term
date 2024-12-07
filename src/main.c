@@ -1,4 +1,14 @@
-// a lotta scopes in here probably, mainly so the compiler can optimize the stack more
+/************************************************\
+| anyone is free to do whatever they want with   |
+| this software, both in source and binary form. |
+| this includes but is not limited to using,     |
+| distributing, modifying and sub-licensing it.  |
+| including the name of the original author(s)   |
+| is encouraged, but not necessary for the above |
+| rights.                                        |
+| the software is provided "as is", without      |
+| warranty of any kind.                          |
+\************************************************/
 
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
