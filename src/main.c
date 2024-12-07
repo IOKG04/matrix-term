@@ -1,67 +1,129 @@
+// a lotta scopes in here probably, mainly so the compiler can optimize the stack more
+
+#define _POSIX_C_SOURCE 200809L
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/ioctl.h>
+#include <termios.h>
 #include <time.h>
-#include "util.h"
+#include <unistd.h>
 
-typedef struct{
-    short head,
-          length;
-} matrix_line_t;
+#define PRINTERR(str) fprintf(stderr, str " at %s, %s, %i\n", __FILE__, __func__, __LINE__)
 
-static int num_mlines = 0,
-           mlines_max = 0;
-static matrix_line_t *mlines = NULL;
+// type of a terminal position
+typedef unsigned short term_pos_t;
 
-static _Bool is_over(void){
-    for(int i = 0; i < num_mlines; ++i){
-        if(mlines[i].head - mlines[i].length < mlines_max) return 0;
-    }
-    return 1;
-}
+// suspends calling thread for ms ms
+static int sleep_ms(int ms);
+// sets buffering of the stds
+static int set_io_buffering(int kind);
+#define IO_BUF_OFF 0
+#define IO_BUF_ON  1
+
+// width and height of terminal (in characters)
+static term_pos_t term_w,
+                  term_h;
 
 int main(int argc, char **argv){
-    int w, h;
-    if(get_term_size(&w, &h)){
-        fprintf(stderr, "Failed to get term size in %s, %s, %i\n", __FILE__, __func__, __LINE__);
-        exit(EXIT_FAILURE);
-    }
-    num_mlines = w;
-    mlines_max = h + 1;
+    int exit_value = EXIT_SUCCESS;
 
-    mlines = malloc(num_mlines * sizeof(*mlines));
-    if(!mlines){
-        fprintf(stderr, "uwu %i\n", __LINE__);
-        exit(EXIT_FAILURE);
-    }
-
-    if(set_io_buffering(0)){
-        fprintf(stderr, "owo %i\n", __LINE__);
-        exit(EXIT_FAILURE);
+    { // get term_w and -h
+        struct winsize wsize;
+        if(ioctl(STDOUT_FILENO, TIOCGWINSZ, &wsize) < 0){
+            PRINTERR("Failed to get terminal size");
+            exit_value = EXIT_FAILURE;
+            goto _clean_and_exit;
+        }
+        term_w = wsize.ws_col;
+        term_h = wsize.ws_row;
     }
 
-    srand(time(NULL));
-    for(int i = 0; i < num_mlines; ++i){
-        mlines[i].head   = -(rand() % (h * 2));
-        mlines[i].length = rand() % h;
+    // disable buffering
+    if(set_io_buffering(IO_BUF_OFF)){
+        PRINTERR("Failed to set io buffering");
+        exit_value = EXIT_FAILURE;
+        goto _clean_and_exit;
     }
 
-    printf("\x1b[2J\x1b[?25l");
-    while(!is_over()){
-        for(int i = 0; i < num_mlines; ++i){
-            const short head = (mlines[i].head++),
-                        tail = head - mlines[i].length;
-            if(head > 0 && head < mlines_max){
-                printf("\x1b[%hi;%hiH#", head, i);
-            }
-            if(tail > 0 && tail < mlines_max){
-                printf("\x1b[%hi;%hiH ", tail, i);
+    char lastchar = 0;
+    while(lastchar != 'q'){
+        ssize_t read_success = read(STDIN_FILENO, &lastchar, 1);
+        if(read_success > 0) putchar(lastchar);
+        sleep_ms(100);
+    }
+
+    // clean and exit
+   _clean_and_exit:
+    set_io_buffering(IO_BUF_ON);
+    exit(exit_value);
+}
+
+// suspends calling thread for ms ms
+static int sleep_ms(int ms){
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (ms % 1000) * 1000000;
+    if(nanosleep(&ts, NULL)){
+        PRINTERR("Failed to sleep");
+        return 1;
+    }
+    return 0;
+}
+// sets buffering of the stds
+static int set_io_buffering(int kind){
+    static struct termios termios_previous;
+    static int stdin_flags;
+    static _Bool termios_previous_set = 0,
+                 stdin_flags_set      = 0;
+    if(kind == IO_BUF_OFF){
+        if(setvbuf(stdout, NULL, _IONBF, 0)){
+            PRINTERR("Failed to set buffering for stdout");
+            return 1;
+        }
+        if(tcgetattr(STDIN_FILENO, &termios_previous)){
+            PRINTERR("Failed to get termios for stdin");
+            return 1;
+        }
+        termios_previous_set = 1;
+        struct termios t = termios_previous;
+        t.c_lflag     &= ~(ICANON | ECHO);
+        t.c_cc[VMIN]   = 1;
+        t.c_cc[VTIME]  = 0;
+        if(tcsetattr(STDIN_FILENO, TCSANOW, &t)){
+            PRINTERR("Failed to set termios for stdin");
+            return 1;
+        }
+        stdin_flags = fcntl(STDIN_FILENO, F_GETFL);
+        if(stdin_flags == -1){
+            PRINTERR("Failed to get stdin_flags");
+            return 1;
+        }
+        stdin_flags_set = 1;
+        if(fcntl(STDIN_FILENO, F_SETFL, stdin_flags | O_NONBLOCK)){
+            PRINTERR("Failed to set stdin flags to be non blocking");
+            return 1;
+        }
+        return 0;
+    }
+    else if(kind == IO_BUF_ON){
+        if(termios_previous_set){
+            if(tcsetattr(STDIN_FILENO, TCSANOW, &termios_previous)){
+                PRINTERR("Failed to reset termios for stdin");
+                return 1;
             }
         }
-        sleep_ms(50);
+        if(stdin_flags_set){
+            if(fcntl(STDIN_FILENO, F_SETFL, stdin_flags)){
+                PRINTERR("Failed to reset stdin flags");
+                return 1;
+            }
+        }
+        return 0;
     }
-    printf("\x1b[?25h\x1b[H");
-
-    set_io_buffering(1);
-    free(mlines);
-    return 0;
+    else{
+        PRINTERR("Provided unsupported value");
+        return 1;
+    }
 }
