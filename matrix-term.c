@@ -12,6 +12,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 #define _GNU_SOURCE
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -132,20 +133,53 @@ int main(void){
             goto _parent_clean_and_exit;
         }
 
-        // sim work
-        sleep_ms(1000);
-        const char *msg = "haiiii kid :3\n";
-        write(child_stdin[1], msg, strlen(msg));
-        printf("sent msg: %s", msg);
-        sleep_ms(1000);
-        char cat[256] = "";
-        read(child_stdout[0], cat, 128);
-        printf("received: %s", cat);
+        // variable setup
+        #define STDOUT_BUF_SIZE (term_h / 2)
+        char *child_stdout_buffer = malloc(STDOUT_BUF_SIZE + 8); // + 8 is buffer
+        if(!child_stdout_buffer){
+            PRINTERR("Failed to allocate child_stdout_buffer");
+            exit_value = EXIT_FAILURE;
+            goto _parent_clean_and_exit;
+        }
+
+        // the loop
+        while(1){
+            // in case i wanna quit
+            char stdin_buf[16] = "";
+            ssize_t stdin_chars_read;
+            if((stdin_chars_read = read(STDIN_FILENO, stdin_buf, 15)) > 0){
+                for(int i = 0; i < stdin_chars_read; ++i){
+                    if(stdin_buf[i] == 'q') goto _parent_clean_and_exit;
+                }
+            }
+
+            // read child stdout
+            _Bool still_reading_stdout = 1;
+            while(still_reading_stdout){
+                memset(child_stdout_buffer, 0, STDOUT_BUF_SIZE + 4);
+                for(int i = 0; i < STDOUT_BUF_SIZE; ++i){
+                    ssize_t read_result = read(child_stdout[0], child_stdout_buffer + i, 1);
+                    if(read_result <= 0){
+                        still_reading_stdout = 0;
+                        break;
+                    }
+                    if(!isprint(child_stdout_buffer[i])){
+                        child_stdout_buffer[i] = 0;
+                        break;
+                    }
+                }
+                if(still_reading_stdout) printf("read line: %s\n", child_stdout_buffer);
+            }
+
+            sleep_ms(10); // to lessen cpu load
+        }
 
         // clean and exit
        _parent_clean_and_exit:
+        if(child_stdout_buffer) free(child_stdout_buffer);
         set_io_buffering(IO_BUF_ON);
         if(exit_value == EXIT_FAILURE) goto _clean_and_exit;
+        #undef STDOUT_BUF_SIZE
     }
 
     // code for the child
@@ -188,7 +222,7 @@ int main(void){
 
         // execute program
         // TODO: replace with actual invoked program
-        if(execlp("cat", "cat", NULL)){
+        if(execlp("cat", "cat", "matrix-term.c", NULL)){
             PRINTERR("Failed to execute child program");
             exit_value = EXIT_FAILURE;
             goto _child_clean_and_exit;
