@@ -17,6 +17,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/ioctl.h>
 #include <termios.h>
 #include <time.h>
@@ -39,6 +40,8 @@ static int sleep_ms(int ms);
 static int set_io_buffering(int kind);
 #define IO_BUF_OFF 0
 #define IO_BUF_ON  1
+// sets fileno to be non blocking, sets flags to flags before change
+static int set_fno_non_blocking(int fileno, int *flags);
 
 // width and height of terminal (in characters)
 static term_pos_t term_w,
@@ -65,25 +68,18 @@ int main(void){
         term_h = wsize.ws_row;
     }
 
-    // disable buffering
-    if(set_io_buffering(IO_BUF_OFF)){
-        PRINTERR("Failed to set io buffering");
-        exit_value = EXIT_FAILURE;
-        goto _clean_and_exit;
-    }
-
     // create pipes
-    if(pipe2(child_stdout, O_NONBLOCK)){
+    if(pipe(child_stdout)){
         PRINTERR("Failed to create child_stdout");
         exit_value = EXIT_FAILURE;
         goto _clean_and_exit;
     }
-    if(pipe2(child_stderr, O_NONBLOCK)){
+    if(pipe(child_stderr)){
         PRINTERR("Failed to create child_stderr");
         exit_value = EXIT_FAILURE;
         goto _clean_and_exit;
     }
-    if(pipe2(child_stdin, O_NONBLOCK)){
+    if(pipe(child_stdin)){
         PRINTERR("Failed to create child_stdin");
         exit_value = EXIT_FAILURE;
         goto _clean_and_exit;
@@ -99,6 +95,57 @@ int main(void){
 
     // code for the parent
     if(is_parent){
+        exit_value = EXIT_SUCCESS; // should be the case anyway, and i assume with -O3 gcc knows that too, but just in case
+
+        // disable buffering
+        if(set_io_buffering(IO_BUF_OFF)){
+            PRINTERR("Failed to set io buffering");
+            exit_value = EXIT_FAILURE;
+            goto _parent_clean_and_exit;
+        }
+
+        // setup pipes
+        if(set_fno_non_blocking(child_stdout[0], NULL)){
+            PRINTERR("Failed to set parent's child_stdout end to non-blocking");
+            exit_value = EXIT_FAILURE;
+            goto _parent_clean_and_exit;
+        }
+        if(set_fno_non_blocking(child_stderr[0], NULL)){
+            PRINTERR("Failed to set parent's child_stderr end to non-blocking");
+            exit_value = EXIT_FAILURE;
+            goto _parent_clean_and_exit;
+        }
+        // no setting up the child_stdin[1] end, cause i think we'd want that to be blocking still
+        if(close(child_stdout[1])){
+            PRINTERR("Failed to close parent's unused child_stdout end");
+            exit_value = EXIT_FAILURE;
+            goto _parent_clean_and_exit;
+        }
+        if(close(child_stderr[1])){
+            PRINTERR("Failed to close parent's unused child_stderr end");
+            exit_value = EXIT_FAILURE;
+            goto _parent_clean_and_exit;
+        }
+        if(close(child_stdin[0])){
+            PRINTERR("Failed to close parent's unused child_stdin end");
+            exit_value = EXIT_FAILURE;
+            goto _parent_clean_and_exit;
+        }
+
+        // sim work
+        sleep_ms(1000);
+        const char *msg = "haiiii kid :3\n";
+        write(child_stdin[1], msg, strlen(msg));
+        printf("sent msg: %s", msg);
+        sleep_ms(1000);
+        char cat[256] = "";
+        read(child_stdout[0], cat, 128);
+        printf("received: %s", cat);
+
+        // clean and exit
+       _parent_clean_and_exit:
+        set_io_buffering(IO_BUF_ON);
+        if(exit_value == EXIT_FAILURE) goto _clean_and_exit;
     }
 
     // code for the child
@@ -139,7 +186,13 @@ int main(void){
             goto _child_clean_and_exit;
         }
 
-        // TODO: make it execute the new program here
+        // execute program
+        // TODO: replace with actual invoked program
+        if(execlp("cat", "cat", NULL)){
+            PRINTERR("Failed to execute child program");
+            exit_value = EXIT_FAILURE;
+            goto _child_clean_and_exit;
+        }
 
         // exit
        _child_clean_and_exit:
@@ -154,7 +207,6 @@ int main(void){
             exit_value = EXIT_FAILURE;
         }
     }
-    set_io_buffering(IO_BUF_ON);
     exit(exit_value);
 }
 
@@ -193,9 +245,8 @@ static int set_io_buffering(int kind){
             PRINTERR("Failed to set termios for stdin");
             return 1;
         }
-        stdin_flags = fcntl(STDIN_FILENO, F_GETFL);
-        if(stdin_flags == -1){
-            PRINTERR("Failed to get stdin_flags");
+        if(set_fno_non_blocking(STDIN_FILENO, &stdin_flags)){
+            PRINTERR("Failed to set stdin to non-blocking");
             return 1;
         }
         stdin_flags_set = 1;
@@ -224,4 +275,18 @@ static int set_io_buffering(int kind){
         PRINTERR("Provided unsupported value");
         return 1;
     }
+}
+// sets fileno to be non blocking, sets flags to flags before change
+static int set_fno_non_blocking(int fileno, int *flags){
+    int fileno_flags = fcntl(fileno, F_GETFL);
+    if(fileno_flags == -1){
+        PRINTERR("Failed to get fileno_flags");
+        return 1;
+    }
+    if(fcntl(fileno, F_SETFL, fileno_flags | O_NONBLOCK)){
+        PRINTERR("Failed to set new flags for fileno");
+        return 1;
+    }
+    if(flags) *flags = fileno_flags;
+    return 0;
 }
