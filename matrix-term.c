@@ -43,6 +43,8 @@ static int set_io_buffering(int kind);
 #define IO_BUF_ON  1
 // sets fileno to be non blocking, sets flags to flags before change
 static int set_fno_non_blocking(int fileno, int *flags);
+// function for safely deinitializing if crtl_c is pressed
+static void handle_crtl_c(int sig);
 
 // width and height of terminal (in characters)
 static term_pos_t term_w,
@@ -98,6 +100,20 @@ int main(void){
     if(is_parent){
         exit_value = EXIT_SUCCESS; // should be the case anyway, and i assume with -O3 gcc knows that too, but just in case
 
+        // setup ctrl_c handler
+        struct sigaction ctrl_c_custom,
+                         ctrl_c_normal;
+        _Bool            ctrl_c_changed = 0;
+        ctrl_c_custom.sa_handler = &handle_crtl_c;
+        ctrl_c_custom.sa_flags   = 0;
+        sigemptyset(&ctrl_c_custom.sa_mask);
+        if(sigaction(SIGINT, &ctrl_c_custom, &ctrl_c_normal)){
+            PRINTERR("Failed to set custom ctrl c handler");
+            exit_value = EXIT_FAILURE;
+            goto _parent_clean_and_exit;
+        }
+        ctrl_c_changed = 1;
+
         // disable buffering
         if(set_io_buffering(IO_BUF_OFF)){
             PRINTERR("Failed to set io buffering");
@@ -134,7 +150,7 @@ int main(void){
         }
 
         // variable setup
-        #define STDOUT_BUF_SIZE (term_h / 2)
+        #define STDOUT_BUF_SIZE (term_h * 4 / 5)
         char *child_stdout_buffer = malloc(STDOUT_BUF_SIZE + 8); // + 8 is buffer
         if(!child_stdout_buffer){
             PRINTERR("Failed to allocate child_stdout_buffer");
@@ -178,6 +194,12 @@ int main(void){
        _parent_clean_and_exit:
         if(child_stdout_buffer) free(child_stdout_buffer);
         set_io_buffering(IO_BUF_ON);
+        if(ctrl_c_changed){
+            if(sigaction(SIGINT, &ctrl_c_normal, NULL)){
+                PRINTERR("Failed to restore ctrl c handler");
+                exit_value = EXIT_FAILURE;
+            }
+        }
         if(exit_value == EXIT_FAILURE) goto _clean_and_exit;
         #undef STDOUT_BUF_SIZE
     }
@@ -323,4 +345,11 @@ static int set_fno_non_blocking(int fileno, int *flags){
     }
     if(flags) *flags = fileno_flags;
     return 0;
+}
+// function for safely deinitializing if crtl_c is pressed
+static void handle_crtl_c(int sig){
+    (void)sig;
+    printf("custom exit :3\n");
+    set_io_buffering(IO_BUF_ON);
+    exit(EXIT_SUCCESS);
 }
