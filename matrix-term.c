@@ -16,6 +16,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +25,20 @@
 #include <time.h>
 #include <unistd.h>
 
+// amount of lines that can be displayed at one time
+#ifndef MLINES
+    #define MLINES 256
+#endif
+// max amount of characters per matrix line
+#ifndef MLINE_HEIGHT
+    #define MLINE_HEIGHT 128
+#endif
+// amount of lines on the right used for stderr
+#ifndef STDERR_MLINES
+    #define STDERR_MLINES 4
+#endif
+
+// print error
 #if defined(DEBUG)
     #define PRINTERR(msg) fprintf(stderr, msg " at %s, %s, %i\nerrno: %s\n", __FILE__, __func__, __LINE__, strerror(errno))
 #elif defined(NDEBUG)
@@ -32,8 +47,17 @@
     #define PRINTERR(msg) fprintf(stderr, msg "\n")
 #endif
 
-// type of a terminal position
+// a terminal position
 typedef unsigned short term_pos_t;
+// a matrix line (with text)
+typedef struct matrix_line_t{
+    term_pos_t x_pos, // 0 based, +1 to get column
+               head,  // same as above
+               length;
+    char       content[MLINE_HEIGHT];
+    term_pos_t content_min,
+               content_len;
+} matrix_line_t;
 
 // suspends calling thread for ms ms
 static int sleep_ms(int ms);
@@ -45,11 +69,12 @@ static int set_io_buffering(int kind);
 static int set_fno_non_blocking(int fileno, int *flags);
 // function for safely deinitializing if crtl_c is pressed
 static void handle_crtl_c(int sig);
+// gets the character at height in mline, random if undefined
+static char mline_sample(const matrix_line_t *mline, term_pos_t height, _Bool *restrict is_content);
 
 // width and height of terminal (in characters)
 static term_pos_t term_w,
                   term_h;
-
 // pipes
 static int child_stdout[2],
            child_stderr[2],
@@ -150,25 +175,21 @@ int main(void){
         }
 
         // variable setup
-        #define STDOUT_BUF_SIZE (term_h * 4 / 5)
+        srand(time(NULL));
+        #define STDOUT_BUF_SIZE (term_h * 1 / 2)
         char *child_stdout_buffer = malloc(STDOUT_BUF_SIZE + 8); // + 8 is buffer
         if(!child_stdout_buffer){
             PRINTERR("Failed to allocate child_stdout_buffer");
             exit_value = EXIT_FAILURE;
             goto _parent_clean_and_exit;
         }
+        matrix_line_t mlines[MLINES] = {(matrix_line_t){0, 0, 0, "", 0, 0}};
+        int curr_mline = 0;
+
+        printf("\x1b[2J");
 
         // the loop
         while(1){
-            // in case i wanna quit
-            char stdin_buf[16] = "";
-            ssize_t stdin_chars_read;
-            if((stdin_chars_read = read(STDIN_FILENO, stdin_buf, 15)) > 0){
-                for(int i = 0; i < stdin_chars_read; ++i){
-                    if(stdin_buf[i] == 'q') goto _parent_clean_and_exit;
-                }
-            }
-
             // read child stdout
             _Bool still_reading_stdout = 1;
             while(still_reading_stdout){
@@ -184,10 +205,34 @@ int main(void){
                         break;
                     }
                 }
-                if(still_reading_stdout) printf("read line: %s\n", child_stdout_buffer);
+                if(still_reading_stdout){ // completed line
+                    strcpy(mlines[curr_mline].content, child_stdout_buffer);
+                    mlines[curr_mline].content_len = strlen(mlines[curr_mline].content);
+                    mlines[curr_mline].head        = 0;
+                    mlines[curr_mline].length      = mlines[curr_mline].content_len + (rand() % (term_h / 3));
+                    mlines[curr_mline].x_pos       = (rand() % (term_w - 1 - STDERR_MLINES)) + 1;
+                    mlines[curr_mline].content_min = (rand() % (term_h - STDOUT_BUF_SIZE)); // TODO: make smarter
+                    curr_mline = (curr_mline + 1) % MLINES;
+                }
             }
 
-            sleep_ms(10); // to lessen cpu load
+            // render (stdout) mlines
+            for(int i = 0; i < MLINES; ++i){
+                if(mlines[i].length <= 0) continue;
+                int        head = mlines[i].head++,
+                           tail = head - mlines[i].length;
+                if(head < term_h){
+                    _Bool is_content;
+                    char nchar = mline_sample(&mlines[i], head, &is_content);
+                    if(is_content) printf("\x1b[%i;%iH\x1b[32m%c", head + 1, mlines[i].x_pos + 1, nchar); // TODO: coloration should be turn off-able
+                    else           printf("\x1b[%i;%iH\x1b[0m%c", head + 1, mlines[i].x_pos + 1, nchar);
+                }
+                if(tail < term_h){
+                    printf("\x1b[%i;%iH ", tail + 1, mlines[i].x_pos + 1);
+                }
+            }
+
+            sleep_ms(50);
         }
 
         // clean and exit
@@ -244,7 +289,7 @@ int main(void){
 
         // execute program
         // TODO: replace with actual invoked program
-        if(execlp("cat", "cat", "matrix-term.c", NULL)){
+        if(execlp("python", "python", "test.py", NULL)){
             PRINTERR("Failed to execute child program");
             exit_value = EXIT_FAILURE;
             goto _child_clean_and_exit;
@@ -349,7 +394,19 @@ static int set_fno_non_blocking(int fileno, int *flags){
 // function for safely deinitializing if crtl_c is pressed
 static void handle_crtl_c(int sig){
     (void)sig;
-    printf("custom exit :3\n");
     set_io_buffering(IO_BUF_ON);
     exit(EXIT_SUCCESS);
+}
+// gets the character at height in mline, random if undefined
+static char mline_sample(const matrix_line_t *mline, term_pos_t height, _Bool *restrict is_content){
+    if(height >= mline->content_min && height < mline->content_min + mline->content_len){
+        *is_content = 1;
+        return mline->content[height - mline->content_min];
+    }
+    static uint32_t rng_state = __LINE__; // too lazy to write my own thing here so __LINE__ it is :3
+    rng_state ^= rng_state << 13;
+    rng_state ^= rng_state >> 17;
+    rng_state ^= rng_state << 5;
+    *is_content = 0;
+    return (rng_state % ('~' - '!')) + '!';
 }
